@@ -1,0 +1,296 @@
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+
+module Main where
+
+import WithCli
+
+import qualified System.IO.Strict as SIO
+import System.IO
+import System.Process
+import System.Environment
+import Data.List.Split
+import Data.Maybe
+import Data.Char
+import Data.Word
+import Data.Bool
+import Data.List
+import Data.Hash
+import Control.Monad
+
+import qualified Data.Map as M
+import qualified Data.Set as S
+
+-- Represent an IPA token
+
+data IPA = IPA [Word32] deriving (Eq, Ord, Show)
+ 
+toIPA :: String -> IPA
+
+toIPA s = IPA $ map (fromIntegral . ord) s
+
+fromIPA :: IPA -> String
+
+fromIPA (IPA i) = map (chr . fromIntegral) i
+
+-- Run espeak to extract IPA from the utterance with given voice
+
+getIPA :: String -> String -> IO [IPA]
+
+getIPA voice utter = do
+  let esp = proc "espeak" [
+        "-q",
+        "--ipa=3",
+        "-v", voice,
+        utter
+        ] 
+  (_, mbhout, _, p) <- createProcess $ esp { std_out = CreatePipe }
+  case mbhout of
+    Nothing -> error "Cannot get espeak handle"
+    Just hout -> do
+      s <- SIO.hGetContents hout >>= return . filter (`notElem` [' ', '\n'])
+      waitForProcess p
+      let splits = splitOneOf "_" s
+      return $ map toIPA splits
+  
+
+data IPAWord = IPAWord {
+  word :: String                     -- word proper
+ ,ipa :: [IPA]                       -- original transcription
+ ,ipa' :: [IPA]                      -- stress and long marks removed
+ ,rfd :: String                      -- refined IPA (expressed in chars)
+ ,rfdpat :: String                   -- vowel-consonant pattern for refined IPA
+ ,rhyfd :: String                    -- refined IPA for rhyming (consonants condensed)
+ ,numvow :: Int                      -- number of vowels
+ ,stress :: Int                      -- stressed vowel position from end
+} deriving (Show)
+
+-- Initially construct an IPA word with minimal refinement that does not require
+-- an attribute map.
+
+ipaword :: String -> [IPA] -> IPAWord
+
+ipaword w i = let i' = filter (not . hollow) i in IPAWord {
+  word = w
+ ,ipa = i'
+ ,ipa' = map clean i'
+ ,rfd = ""
+ ,rfdpat = ""
+ ,rhyfd = ""
+ ,numvow = -1
+ ,stress = -1
+} where clean (IPA is) = IPA $ filter (`notElem` [716, 712, 720]) is
+        hollow (IPA []) = True
+        hollow _ = False
+
+-- Refine an IPA word using the attribute map. If an uncategorized IPA symbol
+-- occurs it is considered a consonant and goes into the refined IPA by taking
+-- the first symbol of itself.
+
+iparefine :: IPAMap -> IPAWord -> IPAWord
+
+iparefine mp ipaw = ipaw {
+  rfd = rf
+ ,rhyfd = map snd rhy
+ ,rfdpat = pat
+ ,numvow = length $ filter (== 'V') pat
+ ,stress = length $ takeWhile (not . stressed . fst) $ vowrev
+} where
+  stressed (IPA is) = (712 `elem` is)
+  vowrev = filter ((== 'V') . snd) $ zip (reverse $ ipa ipaw) (reverse pat)
+  rf = map (refined . attr) (ipa' ipaw)
+  pat = map (bool 'C' 'V' . isVowel . attr) (ipa' ipaw)
+  refpat = zip pat rf
+  conc [] = []
+  conc (('V', c):vcs) = ('V', c):conc vcs
+  conc (('C', c):vcs) = ('C', c):(conc $ dropWhile ((== 'C') . fst) vcs)
+  rhyz = reverse $ conc refpat
+  rhy = case rhyz of
+    (('V', c):_) -> ('C', '_'):rhyz
+    _ -> rhyz
+  attr (IPA []) = error $ "kuku "
+  attr i@(IPA is) = case M.lookup i mp of
+    n | n == Nothing || n == Just IPAUnCat -> IPAAttr {
+                                                isVowel = False
+                                               ,refined = chr $ fromIntegral $ head is
+                                              }
+    Just ia -> ia
+
+
+data IPAAttr = IPAUnCat | IPAAttr {
+  isVowel :: Bool                    -- is this a vowel?
+ ,refined :: Char                    -- equivalent character used for approx. rhyming
+} deriving (Eq, Show)
+
+type IPAMap = M.Map IPA IPAAttr
+
+-- Build a refined IPA map from given corpus of words and possibly nonempty existing IPA map
+
+mkIPAMap :: [IPAWord] -> IPAMap -> IPAMap
+
+mkIPAMap ws prev = m where
+  allipa = S.toList $ S.fromList $ concatMap ipa' ws
+  m = t allipa M.empty
+  t [] mp = mp
+  t (i:is) mp = M.fromList (z i) `M.union` t is mp where
+  z (IPA []) = []
+  z i = case M.lookup i prev of
+    Nothing -> [(i, IPAUnCat)]
+    Just attr -> [(i, attr)]
+
+-- Print an IPA map to the given handle
+-- a:V:a
+-- b:C:b
+
+prtIPAMap :: Handle -> IPAMap -> IO ()
+
+prtIPAMap h mp = w >> hFlush h where
+  w = do
+    let lst = M.toList mp
+    hPutStrLn h "#:Please populate the uncategorized entries"
+    mapM_ z lst where
+      z (i, a) = l i >> r a
+      l i = hPutStr h (fromIPA i) >> hPutStr h ":"
+      r a = case a of
+        IPAUnCat -> hPutStrLn h ""
+        IPAAttr _ _ -> do
+          case isVowel a of
+            True -> hPutStr h "V"
+            False -> hPutStr h "C"
+          hPutStrLn h $ ":" ++ [refined a]
+
+-- Split a line into IPA and attributes
+
+l2a :: String -> Maybe (IPA, IPAAttr)
+
+l2a s = x where
+  toks = splitOneOf ":" s
+  x = case toks of
+    ("#":_ ) -> Nothing
+    (i:vc:r:_) | i /= [] && r /= [] -> Just (toIPA i, IPAAttr iv rf) where
+      iv = vc `elem` ["v", "V"]
+      rf = head r
+    (i:_) | i /= [] -> Just (toIPA i, IPAUnCat)
+    _ -> Nothing
+
+-- Read an IPA map from the given handle
+
+readIPAMap :: Handle -> IO IPAMap
+
+readIPAMap h = do
+  ls <- hGetContents h >>= return . lines
+  let attrs = map l2a ls
+  return $ M.fromList $ catMaybes attrs
+
+-- Words with their IPAs sorted by rhyming patterns grouped by stress position
+
+type RhymeMap = M.Map Int [IPAWord]
+
+mkRhymeMap :: [IPAWord] -> RhymeMap
+
+mkRhymeMap ipws = M.fromList z where
+  ipws' = filter (\w -> length (rhyfd w) > 0) ipws
+  strps = S.toList $ S.fromList $ map stress ipws'
+  swrd s = sortOn rhyfd $ filter ((== s) . stress) ipws'
+  swrds = map swrd strps
+  z = zip strps swrds
+
+-- Print rhyme map on the given handle
+
+prtRhymeMap :: Handle -> RhymeMap -> IO ()
+
+prtRhymeMap h rm = w >> hFlush h where
+  sts = M.keys rm
+  w = mapM_ p sts
+  p s = do
+    hPutStrLn h $ "Words with stress position at " ++ show s
+    let ws = fromMaybe [] $ M.lookup s rm
+    let prtw w = word w ++ " [" ++ (concatMap fromIPA) (ipa w) ++ "] " ++ reverse (rhyfd w)
+    mapM_ (hPutStrLn h . prtw) ws
+
+-- Select words from the corpus for the given stress pattern and seed word.
+-- If the seed word is not provided then the pattern will be used on the first
+-- iteration. On subsequent iterations the word selected will be used.
+-- If the seed word is provided it also goes into the accumulator to become
+-- the last word of the line
+
+mkLine :: String -> Maybe IPAWord -> RhymeMap -> [IPAWord]
+
+mkLine pat mbseed rm = mkl pat0 0 (maybeToList mbseed) hash0 where
+  hash0 = hash $ pat ++ (fromMaybe pat $ fmap word mbseed)
+  pat0 = drop (fromMaybe 0 $ fmap numvow mbseed) $ reverse pat
+  ipahash = hash . word
+  mkl [] _ acc _ = acc
+  mkl (c:tailpat) need acc h | (not . isUpper) c = mkl tailpat (need + 1) acc h
+  mkl (c:tailpat) need acc h | isUpper c = let fw = findword need (c:tailpat) h in
+    mkl (drop (numvow fw - need - 1) tailpat) 0 (fw : acc) (ipahash fw)
+  findword need tp h = case M.lookup need rm of
+    Nothing -> error $ "no words with stress position " ++ show need
+    Just x -> let found = x !! ((fromIntegral $ asWord64 h) `mod` (length x - 1)) in
+                  case (numvow found) <= (need + length tp) of
+                    True -> found
+                    False -> findword need tp (ipahash found)
+
+mkIPAWord :: IPAMap -> String -> String -> IO (Maybe IPAWord)
+
+mkIPAWord im vc w = do
+  ipa <- getIPA vc $ map toLower w
+  let ipaw = ipaword w ipa
+  return $ Just $ iparefine im ipaw
+
+main :: IO ()
+
+main = withCliModified mods main'
+
+main' :: TextFile -> RhyPat -> Options -> IO ()
+
+main' (TextFile file) (RhyPat rhypat) opts = do
+  let vc = fromMaybe "default" $ voice opts
+  let uniq = S.toList . S.fromList
+  w0 <- readFile file
+  let w = uniq $ map (filter isAlpha) $ words $ map toLower w0
+  ipax <- mapM (getIPA vc) w
+  let ipaw = zipWith ipaword w ipax
+  mprev <- openFile "ipacat.txt" ReadMode >>= readIPAMap
+  let mp = mkIPAMap ipaw mprev
+      uncat = M.filter (== IPAUnCat) mp
+  openFile "ipauncat.txt" WriteMode >>= flip prtIPAMap uncat
+  let rfipaw = map (iparefine mp) ipaw
+  let rm = mkRhymeMap rfipaw
+  mbiw <- maybe (return Nothing) (mkIPAWord mp vc) (endw opts)
+  let s = mkLine rhypat mbiw rm
+  putStrLn $ concatMap (\w -> word w ++ " ") s
+  putStrLn $ concatMap (\w -> (concatMap fromIPA $ ipa w) ++ " ") s
+  return ()
+
+data TextFile = TextFile FilePath
+
+instance Argument TextFile where
+  argumentType Proxy = "text-file"
+  parseArgument f = Just (TextFile f)
+
+instance HasArguments TextFile where
+  argumentsParser = atomicArgumentsParser
+
+
+data RhyPat = RhyPat String
+
+instance Argument RhyPat where
+  argumentType Proxy = "rhyme-pattern"
+  parseArgument f = Just (RhyPat f)
+
+instance HasArguments RhyPat where
+  argumentsParser = atomicArgumentsParser
+
+
+data Options = Options {
+  endw :: Maybe String
+ ,voice :: Maybe String
+} deriving (Show, Generic, HasArguments)
+
+mods :: [Modifier]
+
+mods = [
+  AddShortOption "voice" 'v'
+ ,AddShortOption "endw" 'w'
+       ]
