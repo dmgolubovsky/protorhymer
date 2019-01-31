@@ -17,6 +17,7 @@ import Data.Bool
 import Data.List
 import Data.Hash
 import Control.Monad
+import Control.Monad.Identity
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -63,7 +64,7 @@ data IPAWord = IPAWord {
  ,rhyfd :: String                    -- refined IPA for rhyming (consonants condensed)
  ,numvow :: Int                      -- number of vowels
  ,stress :: Int                      -- stressed vowel position from end
-} deriving (Show)
+} deriving (Ord, Eq, Show)
 
 -- Initially construct an IPA word with minimal refinement that does not require
 -- an attribute map.
@@ -214,9 +215,9 @@ prtRhymeMap h rm = w >> hFlush h where
 -- If the seed word is provided it also goes into the accumulator to become
 -- the last word of the line
 
-mkLine :: String -> Maybe IPAWord -> RhymeMap -> [IPAWord]
+mkLine :: String -> RhymeMap ->  Maybe IPAWord -> [IPAWord]
 
-mkLine pat mbseed rm = mkl pat0 0 (maybeToList mbseed) hash0 where
+mkLine pat rm mbseed = mkl pat0 0 (maybeToList mbseed) hash0 where
   hash0 = hash $ pat ++ (fromMaybe pat $ fmap word mbseed)
   pat0 = drop (fromMaybe 0 $ fmap numvow mbseed) $ reverse pat
   ipahash = hash . word
@@ -231,12 +232,44 @@ mkLine pat mbseed rm = mkl pat0 0 (maybeToList mbseed) hash0 where
                     True -> found
                     False -> findword need tp (ipahash found)
 
-mkIPAWord :: IPAMap -> String -> String -> IO (Maybe IPAWord)
+mkIPAWord :: IPAMap -> String -> String -> IO IPAWord
 
 mkIPAWord im vc w = do
   ipa <- getIPA vc $ map toLower w
   let ipaw = ipaword w ipa
-  return $ Just $ iparefine im ipaw
+  return $ iparefine im ipaw
+
+-- Range search
+
+rangeSearchM :: (Monad m, Num r, Integral r) => r -> (r, r) -> (r -> m Ordering) -> m (r, r)
+
+rangeSearchM delta (lo, hi) fun | hi - lo <= delta = return (lo, hi)
+
+rangeSearchM delta (lo, hi) fun = do
+  let mid = (lo + hi) `div` 2
+  res <- fun mid
+  case res of
+    EQ -> return (mid, mid)
+    LT -> rangeSearchM delta (lo, mid) fun
+    GT -> rangeSearchM delta (mid, hi) fun
+
+-- Find up to the given number of words rhyming with this word
+
+findRhymes :: RhymeMap -> IPAWord -> Int -> [IPAWord]
+
+findRhymes _ _ 0 = []
+
+findRhymes rm iw n = runIdentity $ do
+  let iws = M.lookup (stress iw) rm
+  case iws of
+    Nothing -> return []
+    Just iwds -> do
+      (lo, hi) <- rangeSearchM 1 (0, length iwds) $ \mid ->
+        return $ compare (rhyfd iw) (rhyfd $ iwds !! mid)
+      let lo' = max 0 (lo - n `div` 2)
+          hi' = min (length iwds - 1) (lo' + n)
+      return $ map (iwds !!) [lo' .. hi']
+
 
 main :: IO ()
 
@@ -257,10 +290,21 @@ main' (TextFile file) (RhyPat rhypat) opts = do
   openFile "ipauncat.txt" WriteMode >>= flip prtIPAMap uncat
   let rfipaw = map (iparefine mp) ipaw
   let rm = mkRhymeMap rfipaw
-  mbiw <- maybe (return Nothing) (mkIPAWord mp vc) (endw opts)
-  let s = mkLine rhypat mbiw rm
-  putStrLn $ concatMap (\w -> word w ++ " ") s
-  putStrLn $ concatMap (\w -> (concatMap fromIPA $ ipa w) ++ " ") s
+  mbiw <- maybe (return [Nothing]) ( \w -> do
+    ipw <- mkIPAWord mp vc w
+    let rhs = findRhymes rm ipw (fromMaybe 0 $ rhymes opts)
+    let iwrhs = S.toList $ S.fromList (ipw:rhs)
+    return $ map Just iwrhs
+    )
+    (endw opts)
+  mapM (\s -> do
+    putStrLn $ concatMap (\w -> word w ++ " ") s
+    if (ipa'' opts) then
+      putStrLn $ "[" ++ concatMap (\w -> (concatMap fromIPA $ ipa w) ++ " ") s ++ "]"
+    else
+      return ()
+    ) $ map (mkLine rhypat rm) mbiw
+
   return ()
 
 data TextFile = TextFile FilePath
@@ -286,6 +330,8 @@ instance HasArguments RhyPat where
 data Options = Options {
   endw :: Maybe String
  ,voice :: Maybe String
+ ,ipa'' :: Bool
+ ,rhymes :: Maybe Int
 } deriving (Show, Generic, HasArguments)
 
 mods :: [Modifier]
@@ -293,4 +339,6 @@ mods :: [Modifier]
 mods = [
   AddShortOption "voice" 'v'
  ,AddShortOption "endw" 'w'
+ ,AddShortOption "ipa''" 'i'
+ ,AddShortOption "rhymes" 'r'
        ]
