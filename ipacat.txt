@@ -79,4 +79,27 @@ a:V:a
 ʉɹ:V:u
 ʌɹ:V:a
 ʌʉ:V:a
+bʲ:C:b
+dʲ:C:d
+fʲ:C:f
+ja:V:a
+ju:V:u
+kʲ:C:k
+mʲ:C:m
+pʲ:C:p
+rʲ:C:r
+sʲ:C:s
+ts:C:t
+tʃʲ:C:s
+tʲ:C:t
+u":V:u
+vʲ:C:v
+x:C:s
+y:V:i
+ɕ:C:8
+ɡʲ:C:g
+ɪ^:C:j
+ɭ:C:l
+ɵ:V:a
+ʑ:C:z
 

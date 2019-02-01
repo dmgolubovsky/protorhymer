@@ -217,6 +217,8 @@ prtRhymeMap h rm = w >> hFlush h where
 
 mkLine :: String -> RhymeMap ->  Maybe IPAWord -> [IPAWord]
 
+mkLine "." _ (Just iw) = [iw]
+
 mkLine pat rm mbseed = mkl pat0 0 (maybeToList mbseed) hash0 where
   hash0 = hash $ pat ++ (fromMaybe pat $ fmap word mbseed)
   pat0 = drop (fromMaybe 0 $ fmap numvow mbseed) $ reverse pat
@@ -267,7 +269,7 @@ findRhymes rm iw n = runIdentity $ do
       (lo, hi) <- rangeSearchM 1 (0, length iwds) $ \mid ->
         return $ compare (rhyfd iw) (rhyfd $ iwds !! mid)
       let lo' = max 0 (lo - n `div` 2)
-          hi' = min (length iwds - 1) (lo' + n)
+          hi' = min (length iwds - 1) (lo' + n - 1)
       return $ map (iwds !!) [lo' .. hi']
 
 
@@ -294,17 +296,14 @@ main' (TextFile file) (RhyPat rhypat) opts = do
     ipw <- mkIPAWord mp vc w
     let rhs = findRhymes rm ipw (fromMaybe 0 $ rhymes opts)
     let iwrhs = S.toList $ S.fromList (ipw:rhs)
-    return $ map Just iwrhs
-    )
-    (endw opts)
-  mapM (\s -> do
+    return $ map Just iwrhs) (endw opts)
+  let sm = map (mkLine rhypat rm) mbiw
+  forM sm $ \s -> do
     putStrLn $ concatMap (\w -> word w ++ " ") s
     if (ipa'' opts) then
       putStrLn $ "[" ++ concatMap (\w -> (concatMap fromIPA $ ipa w) ++ " ") s ++ "]"
     else
       return ()
-    ) $ map (mkLine rhypat rm) mbiw
-
   return ()
 
 data TextFile = TextFile FilePath
@@ -338,7 +337,11 @@ mods :: [Modifier]
 
 mods = [
   AddShortOption "voice" 'v'
+ ,AddOptionHelp  "voice" "Espeak voice name to use"
  ,AddShortOption "endw" 'w'
+ ,AddOptionHelp  "endw" "Ending word of the line"
  ,AddShortOption "ipa''" 'i'
+ ,AddOptionHelp  "ipa''" "Print IPA transcription"
  ,AddShortOption "rhymes" 'r'
+ ,AddOptionHelp  "rhymes" "Number of rhymed lines to produce"
        ]
