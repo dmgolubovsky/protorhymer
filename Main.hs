@@ -1,9 +1,11 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
 import WithCli
+import Paths_protorhymer
 
 import qualified System.IO.Strict as SIO
 import System.IO
@@ -18,6 +20,7 @@ import Data.List
 import Data.Hash
 import Control.Monad
 import Control.Monad.Identity
+import Control.Exception
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -286,10 +289,17 @@ main' (TextFile file) (RhyPat rhypat) opts = do
   let w = uniq $ map (filter isAlpha) $ words $ map toLower w0
   ipax <- mapM (getIPA vc) w
   let ipaw = zipWith ipaword w ipax
-  mprev <- openFile "ipacat.txt" ReadMode >>= readIPAMap
+  icpath <- getDataFileName "ipacat.txt"
+  mprev <- (openFile "ipacat.txt" ReadMode `catch` 
+            \ (e :: IOException) -> openFile icpath ReadMode) >>= readIPAMap
   let mp = mkIPAMap ipaw mprev
       uncat = M.filter (== IPAUnCat) mp
-  openFile "ipauncat.txt" WriteMode >>= flip prtIPAMap uncat
+  if length uncat > 0
+    then openFile "ipauncat.txt" WriteMode >>= flip prtIPAMap uncat
+    else return ()
+  if ipadump opts
+    then openFile "ipacat.txt" WriteMode >>= flip prtIPAMap mp
+    else return ()
   let rfipaw = map (iparefine mp) ipaw
   let rm = mkRhymeMap rfipaw
   mbiw <- maybe (return [Nothing]) ( \w -> do
@@ -331,6 +341,7 @@ data Options = Options {
  ,voice :: Maybe String
  ,ipa'' :: Bool
  ,rhymes :: Maybe Int
+ ,ipadump :: Bool
 } deriving (Show, Generic, HasArguments)
 
 mods :: [Modifier]
