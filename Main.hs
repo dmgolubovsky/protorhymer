@@ -307,7 +307,13 @@ main' (TextFile file) (RhyPat rhypat) opts = do
     let rhs = findRhymes rm ipw (fromMaybe 0 $ rhymes opts)
     let iwrhs = S.toList $ S.fromList (ipw:rhs)
     return $ map Just iwrhs) (endw opts)
-  let sm = map (mkLine rhypat rm) mbiw
+  let sm = case mbiw of
+                  [Nothing] -> let line0 = mkLine rhypat rm Nothing
+                                   lastw = head $ reverse line0
+                                   rhms = findRhymes rm lastw (fromMaybe 0 $ rhymes opts)
+                                   lines = map (mkLine rhypat rm . Just) rhms
+                               in  line0 : lines
+                  _ -> map (mkLine rhypat rm) mbiw
   forM sm $ \s -> do
     putStrLn $ concatMap (\w -> word w ++ " ") s
     if (ipa'' opts) then
