@@ -91,16 +91,16 @@ ipaword w i = let i' = filter (not . hollow) i in IPAWord {
 -- occurs it is considered a consonant and goes into the refined IPA by taking
 -- the first symbol of itself.
 
-iparefine :: IPAMap -> IPAWord -> IPAWord
+iparefine :: Bool -> IPAMap -> IPAWord -> IPAWord
 
-iparefine mp ipaw = ipaw {
+iparefine sec mp ipaw = ipaw {
   rfd = rf
  ,rhyfd = map snd rhy
  ,rfdpat = pat
  ,numvow = length $ filter (== 'V') pat
  ,stress = length $ takeWhile (not . stressed . fst) $ vowrev
 } where
-  stressed (IPA is) = (712 `elem` is)
+  stressed (IPA is) = (712 `elem` is) || (sec && (716 `elem` is))
   vowrev = filter ((== 'V') . snd) $ zip (reverse $ ipa ipaw) (reverse pat)
   rf = map (refined . attr) (ipa' ipaw)
   pat = map (bool 'C' 'V' . isVowel . attr) (ipa' ipaw)
@@ -226,7 +226,8 @@ mkLine pat rm mbseed = mkl pat0 0 (maybeToList mbseed) hash0 where
   hash0 = hash $ pat ++ (fromMaybe pat $ fmap word mbseed)
   pat0 = drop (fromMaybe 0 $ fmap numvow mbseed) $ reverse pat
   ipahash = hash . word
-  mkl [] _ acc _ = acc
+  mkl [] rem acc h | rem == 0 = acc
+                   | rem > 0 = (findword 0 (replicate rem 's') h) : acc
   mkl (c:tailpat) need acc h | (not . isUpper) c = mkl tailpat (need + 1) acc h
   mkl (c:tailpat) need acc h | isUpper c = let fw = findword need (c:tailpat) h in
     mkl (drop (numvow fw - need - 1) tailpat) 0 (fw : acc) (ipahash fw)
@@ -237,12 +238,12 @@ mkLine pat rm mbseed = mkl pat0 0 (maybeToList mbseed) hash0 where
                     True -> found
                     False -> findword need tp (ipahash found)
 
-mkIPAWord :: IPAMap -> String -> String -> IO IPAWord
+mkIPAWord :: Bool -> IPAMap -> String -> String -> IO IPAWord
 
-mkIPAWord im vc w = do
+mkIPAWord sec im vc w = do
   ipa <- getIPA vc $ map toLower w
   let ipaw = ipaword w ipa
-  return $ iparefine im ipaw
+  return $ iparefine sec im ipaw
 
 -- Range search
 
@@ -300,10 +301,10 @@ main' (TextFile file) (RhyPat rhypat) opts = do
   if ipadump opts
     then openFile "ipacat.txt" WriteMode >>= flip prtIPAMap mp
     else return ()
-  let rfipaw = map (iparefine mp) ipaw
+  let rfipaw = map (iparefine (second opts) mp) ipaw
   let rm = mkRhymeMap rfipaw
   mbiw <- maybe (return [Nothing]) ( \w -> do
-    ipw <- mkIPAWord mp vc w
+    ipw <- mkIPAWord (second opts) mp vc w
     let rhs = findRhymes rm ipw (fromMaybe 0 $ rhymes opts)
     let iwrhs = S.toList $ S.fromList (ipw:rhs)
     return $ map Just iwrhs) (endw opts)
@@ -348,6 +349,7 @@ data Options = Options {
  ,ipa'' :: Bool
  ,rhymes :: Maybe Int
  ,ipadump :: Bool
+ ,second :: Bool
 } deriving (Show, Generic, HasArguments)
 
 mods :: [Modifier]
@@ -361,4 +363,6 @@ mods = [
  ,AddOptionHelp  "ipa''" "Print IPA transcription"
  ,AddShortOption "rhymes" 'r'
  ,AddOptionHelp  "rhymes" "Number of rhymed lines to produce"
+ ,AddShortOption "second" 's'
+ ,AddOptionHelp  "second" "Treat secondary stresses as primary"
        ]
