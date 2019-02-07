@@ -287,7 +287,7 @@ main' (TextFile file) (RhyPat rhypat) opts = do
   let vc = fromMaybe "default" $ voice opts
   let uniq = S.toList . S.fromList
   w0 <- readFile file
-  let w = uniq $ map (filter isAlpha) $ words $ map toLower w0
+  let w = filter ((> 3) . length) . uniq $ map (filter isAlpha) $ words $ map toLower w0
   ipax <- mapM (getIPA vc) w
   let ipaw = zipWith ipaword w ipax
   icpath <- getDataFileName "ipacat.txt"
