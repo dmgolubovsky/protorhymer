@@ -17,10 +17,15 @@ import Data.Char
 import Data.Word
 import Data.Bool
 import Data.List
+import Data.List.Split
 import Data.Hash
+import qualified Data.Vector as V
 import Control.Monad
 import Control.Monad.Identity
 import Control.Exception
+import GHC.Conc
+import qualified Control.Concurrent.Thread.Group as G
+import qualified Control.Concurrent.Thread as T
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -133,7 +138,7 @@ type IPAMap = M.Map IPA IPAAttr
 mkIPAMap :: [IPAWord] -> IPAMap -> IPAMap
 
 mkIPAMap ws prev = m where
-  allipa = S.toList $ S.fromList $ concatMap ipa' ws
+  allipa = nub $ concatMap ipa' ws
   m = t allipa M.empty
   t [] mp = mp
   t (i:is) mp = M.fromList (z i) `M.union` t is mp where
@@ -188,16 +193,16 @@ readIPAMap h = do
 
 -- Words with their IPAs sorted by rhyming patterns grouped by stress position
 
-type RhymeMap = M.Map Int [IPAWord]
+type RhymeMap = M.Map Int (V.Vector IPAWord)
 
 mkRhymeMap :: [IPAWord] -> RhymeMap
 
 mkRhymeMap ipws = M.fromList z where
-  ipws' = filter (\w -> length (rhyfd w) > 0) ipws
-  strps = S.toList $ S.fromList $ map stress ipws'
+  ipws' = filter ((> 0) . length . rhyfd) ipws
+  strps = nub $ map stress ipws'
   swrd s = sortOn rhyfd $ filter ((== s) . stress) ipws'
   swrds = map swrd strps
-  z = zip strps swrds
+  z = zip strps (map V.fromList swrds)
 
 -- Print rhyme map on the given handle
 
@@ -208,7 +213,7 @@ prtRhymeMap h rm = w >> hFlush h where
   w = mapM_ p sts
   p s = do
     hPutStrLn h $ "Words with stress position at " ++ show s
-    let ws = fromMaybe [] $ M.lookup s rm
+    let ws = fromMaybe V.empty $ M.lookup s rm
     let prtw w = word w ++ " [" ++ (concatMap fromIPA) (ipa w) ++ "] " ++ reverse (rhyfd w)
     mapM_ (hPutStrLn h . prtw) ws
 
@@ -233,7 +238,7 @@ mkLine pat rm mbseed = mkl pat0 0 (maybeToList mbseed) hash0 where
     mkl (drop (numvow fw - need - 1) tailpat) 0 (fw : acc) (ipahash fw)
   findword need tp h = case M.lookup need rm of
     Nothing -> error $ "no words with stress position " ++ show need
-    Just x -> let found = x !! ((fromIntegral $ asWord64 h) `mod` (length x - 1)) in
+    Just x -> let found = x V.! (((fromIntegral $ asWord64 h) `mod` (length x - 1))) in
                   case (numvow found) <= (need + length tp) of
                     True -> found
                     False -> findword need tp (ipahash found)
@@ -271,10 +276,29 @@ findRhymes rm iw n = runIdentity $ do
     Nothing -> return []
     Just iwds -> do
       (lo, hi) <- rangeSearchM 1 (0, length iwds) $ \mid ->
-        return $ compare (rhyfd iw) (rhyfd $ iwds !! mid)
+        return $ compare (rhyfd iw) (rhyfd $ iwds V.! mid)
       let lo' = max 0 (lo - n `div` 2)
           hi' = min (length iwds - 1) (lo' + n - 1)
-      return $ map (iwds !!) [lo' .. hi']
+      return $ V.toList $ V.slice lo' (hi' - lo' + 1) iwds
+
+
+mapMPar :: (a -> IO b) -> [a] -> IO [b]
+
+mapMPar fun lst = do
+  ncr <- getNumProcessors
+  case ncr of
+    _ | ncr <= 2 -> mapM fun lst
+    _ -> do
+      setNumCapabilities (ncr + 1)
+      let nthr = ncr
+      let slices = chunksOf (length lst `div` nthr) lst
+      tg <- G.new
+      thrs <- forM slices $ \sl -> G.forkOS tg (mapM fun sl)
+      G.wait tg
+      ipas <- forM thrs $ (T.result =<<) . snd
+      return $ concat ipas
+        
+      
 
 
 main :: IO ()
@@ -285,10 +309,9 @@ main' :: TextFile -> RhyPat -> Options -> IO ()
 
 main' (TextFile file) (RhyPat rhypat) opts = do
   let vc = fromMaybe "default" $ voice opts
-  let uniq = S.toList . S.fromList
   w0 <- readFile file
-  let w = filter ((> 3) . length) . uniq $ map (filter isAlpha) $ words $ map toLower w0
-  ipax <- mapM (getIPA vc) w
+  let w = filter ((> 3) . length) . nub $ map (filter isAlpha) $ words $ map toLower w0
+  ipax <- mapMPar (getIPA vc) w
   let ipaw = zipWith ipaword w ipax
   icpath <- getDataFileName "ipacat.txt"
   mprev <- (openFile "ipacat.txt" ReadMode `catch` 
@@ -305,7 +328,7 @@ main' (TextFile file) (RhyPat rhypat) opts = do
   let rm = mkRhymeMap rfipaw
   mbiw <- maybe (return [Nothing]) ( \w -> do
     ipw <- mkIPAWord (second opts) mp vc w
-    let rhs = findRhymes rm ipw (fromMaybe 0 $ rhymes opts)
+    let rhs = (findRhymes $! rm) ipw (fromMaybe 0 $ rhymes opts)
     let iwrhs = S.toList $ S.fromList (ipw:rhs)
     return $ map Just iwrhs) (endw opts)
   let sm = case mbiw of
