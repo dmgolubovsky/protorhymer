@@ -49,8 +49,10 @@ getIPA :: String -> String -> IO [IPA]
 getIPA voice utter = do
   let esp = proc "espeak" [
         "-q",
-        "--ipa=3",
+        "--ipa",
+        "--sep=_",
         "-v", voice,
+        "--load",
         utter
         ] 
   (_, mbhout, _, p) <- createProcess $ esp { std_out = CreatePipe }
@@ -313,7 +315,7 @@ main' (TextFile file) (RhyPat rhypat) opts = do
   let w = filter ((> 3) . length) . nub $ map (filter isAlpha) $ words $ map toLower w0
   ipax <- mapMPar (getIPA vc) w
   let ipaw = zipWith ipaword w ipax
-  icpath <- getDataFileName "ipacat.txt"
+  let icpath = "/espvs/share/prhymer/ipacat.txt"
   mprev <- (openFile "ipacat.txt" ReadMode `catch` 
             \ (e :: IOException) -> openFile icpath ReadMode) >>= readIPAMap
   let mp = mkIPAMap ipaw mprev
